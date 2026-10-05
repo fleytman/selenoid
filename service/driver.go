@@ -77,7 +77,7 @@ func (d *Driver) StartWithCancel() (*StartedService, error) {
 	}
 	log.Printf("[%d] [PROCESS_STARTED] [%d] [%.2fs]", requestId, cmd.Process.Pid, util.SecondsSince(s))
 	log.Printf("[%d] [PROXY_TO] [%s]", requestId, u.String())
-	hp := session.HostPort{}
+	hp := session.HostPort{Devtools: u.Host}
 	if d.Caps.VNC {
 		hp.VNC = "127.0.0.1:5900"
 	}
