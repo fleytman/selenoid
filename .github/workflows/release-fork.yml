@@ -1,0 +1,92 @@
+name: release-fork
+
+on:
+  push:
+    tags:
+      - '*-fork.*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.19.3'
+  TARGETS: 'darwin/arm64 linux/amd64'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Golang
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          VERSION="$(git describe --tags)"
+          BASE="$(git describe --tags --abbrev=0 --exclude='*-fork.*' HEAD)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+              echo "::error::git describe gives '${VERSION}', expected tag '${GITHUB_REF_NAME}'"
+              exit 1
+            fi
+            if [ "${GITHUB_REF_NAME%%-fork.*}" != "${BASE}" ]; then
+              echo "::error::tag '${GITHUB_REF_NAME}' is on top of upstream '${BASE}', not '${GITHUB_REF_NAME%%-fork.*}'"
+              exit 1
+            fi
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "BASE=${BASE}" >> "$GITHUB_ENV"
+          echo "version=${VERSION} base=${BASE} go=$(go env GOVERSION)"
+
+      - name: Test
+        run: go test -tags 's3 metadata' ./...
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          STAMP="$(LC_ALL=C date -u '+%Y-%m-%d_%I:%M:%S%p')"
+          mkdir -p dist
+          for target in ${TARGETS}; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="selenoid_${os}_${arch}"
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
+              -ldflags "-X main.buildStamp=${STAMP} -X main.gitRevision=${VERSION} -s -w" \
+              -o "dist/${name}" .
+            (cd dist && sha256sum "${name}" > "${name}.sha256")
+          done
+          ./dist/selenoid_linux_amd64 -version
+          cat dist/*.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selenoid-${{ env.VERSION }}
+          path: dist/
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Upstream aerokube/selenoid ${BASE} + fork patch (see README-FORK.md)."
+            echo "Built with $(go env GOVERSION), CGO_ENABLED=0, ldflags as upstream ci/build.sh."
+            echo
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } > release-notes.md
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md
